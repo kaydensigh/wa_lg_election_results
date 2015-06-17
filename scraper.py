@@ -84,12 +84,24 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
             ward_tables = zip(details_div.findAll('table', {'class': lambda x: x != 'waecModTable'})[1:], details_div.findAll('table', {'class': 'waecModTable'}))
         else:
             old_style = False
-            ward_tables = zip(details_div.findAll('table', {'class': 'election_info'}), details_div.findAll('table', {'class': 'election_results'}))
+
+            ward_tables = [[]]
+            for table in details_div.findAll('table'):
+                if table.attrs['class'][0] == 'election_info':
+                    ward_tables[-1].append(table)
+                elif table.attrs['class'][0] == 'election_results':
+                    ward_tables[-1].append(table)
+                    ward_tables.append([])
+
+            ward_tables.pop(-1)
 
         election_info['wards'] = {}
-        for info, results in ward_tables:
+        for data in ward_tables:
+            infos = data[:1]
+            results = data[-1]
+
             ward_election = {}
-            for row in info.findAll('tr'):
+            for row in infos[0].findAll('tr'):
                 if len(row.findAll('td')) != 2:
                     continue
 
@@ -116,9 +128,9 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
                 ward_election['candidates'].append(candidate)
 
             if old_style:
-                ward_name = " ".join(x.text for x in info.find('tr').findAll('td')).split(' - ')[-1]
+                ward_name = " ".join(x.text for x in infos[0].find('tr').findAll('td')).split(' - ')[-1]
             else:
-                ward_name = info.find('th').text
+                ward_name = (infos[0].find('th') or infos[0].find('td')).text
 
             election_info['wards'][ward_name] = ward_election
 

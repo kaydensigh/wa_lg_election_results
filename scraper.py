@@ -38,9 +38,6 @@ council_list = get_page(host+'/elections/local/council-list/', 'council-list.htm
 for council in council_list.findAll(attrs={'class': 'council-list-name'}):
     council_name = council.text
 
-    if council_name != 'Bassendean':
-        continue
-
     council_elections_list_url = host+urllib2.quote(council.find('a').attrs['href'])
     council_elections_list = get_page(council_elections_list_url, sanify(council_name)+'.html')
 
@@ -108,10 +105,10 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
                 candidate['name'], candidate['votes'], cand_percent, candidate['expires'] = (x.text.strip() for x in row.findAll('td'))
 
                 if 'class' in row.attrs:
-                    if row.attrs['class'][0] in ('waecModTableFooter',):
+                    if row.attrs['class'][0] in ('waecModTableFooter','waecModTableHeader'):
                         continue
 
-                    assert row.attrs['class'][0] in ('Elected_Pos', 'backGroundLightBrown'), row.attrs
+                    assert row.attrs['class'][0] in ('Elected_Pos', 'backGroundLightBrown'), (row.attrs, election_info)
                     candidate['elected'] = True
                 else:
                     candidate['elected'] = False
@@ -127,27 +124,4 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
 
     print "="*80
     pprint.pprint(council_info)
-
-    break
-
-# import scraperwiki
-# import lxml.html
-#
-# # Read in a page
-# html = scraperwiki.scrape("http://foo.com")
-#
-# # Find something on the page using css selectors
-# root = lxml.html.fromstring(html)
-# root.cssselect("div[align='left']")
-#
-# # Write out to the sqlite database using scraperwiki library
-# scraperwiki.sqlite.save(unique_keys=['name'], data={"name": "susan", "occupation": "software developer"})
-#
-# # An arbitrary query against the database
-# scraperwiki.sql.select("* from data where 'name'='peter'")
-
-# You don't have to do things with the ScraperWiki and lxml libraries.
-# You can use whatever libraries you want: https://morph.io/documentation/python
-# All that matters is that your final data is written to an SQLite database
-# called "data.sqlite" in the current working directory which has at least a table
-# called "data".
+    print "="*80

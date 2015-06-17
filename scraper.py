@@ -80,8 +80,17 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
         election_details_page = get_page(election_info['url'], election_cache_name)
 
         details_div = election_details_page.find('div', {'id': 'council-results'})
+
+        
+        if details_div.findAll('table', {'class': 'waecModTable'}):
+            old_style = True
+            ward_tables = zip(details_div.findAll('table', {'class': lambda x: x != 'waecModTable'})[1:], details_div.findAll('table', {'class': 'waecModTable'}))
+        else:
+            old_style = False
+            ward_tables = zip(details_div.findAll('table', {'class': 'election_info'}), details_div.findAll('table', {'class': 'election_results'}))
+
         election_info['wards'] = {}
-        for info, results in zip(details_div.findAll('table', {'class': 'election_info'}), details_div.findAll('table', {'class': 'election_results'})):
+        for info, results in ward_tables:
             ward_election = {}
             for row in info.findAll('tr'):
                 if len(row.findAll('td')) != 2:
@@ -96,17 +105,25 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
                     continue
 
                 candidate = {}
-                candidate['name'], candidate['votes'], cand_percent, candidate['expires'] = (x.text for x in row.findAll('td'))
+                candidate['name'], candidate['votes'], cand_percent, candidate['expires'] = (x.text.strip() for x in row.findAll('td'))
 
                 if 'class' in row.attrs:
-                    assert row.attrs['class'][0] == 'Elected_Pos', row.attrs
+                    if row.attrs['class'][0] in ('waecModTableFooter',):
+                        continue
+
+                    assert row.attrs['class'][0] in ('Elected_Pos', 'backGroundLightBrown'), row.attrs
                     candidate['elected'] = True
                 else:
                     candidate['elected'] = False
 
                 ward_election['candidates'].append(candidate)
 
-            election_info['wards'][info.find('th').text] = ward_election
+            if old_style:
+                ward_name = " ".join(x.text for x in info.find('tr').findAll('td')).split(' - ')[-1]
+            else:
+                ward_name = info.find('th').text
+
+            election_info['wards'][ward_name] = ward_election
 
     print "="*80
     pprint.pprint(council_info)

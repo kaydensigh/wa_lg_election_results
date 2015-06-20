@@ -258,6 +258,7 @@ host = 'http://www.elections.wa.gov.au'
 council_list = get_page(host+'/elections/local/council-list/', 'council-list.html')
 council_divs = council_list.findAll(attrs={'class': 'council-list-name'})
 council_infos = [get_council_info(div) for div in council_divs]
+SQLITE_CONNECTION.commit()
 
 today = datetime.today()
 current_councillors = [get_current(today, info) for info in council_infos if info]

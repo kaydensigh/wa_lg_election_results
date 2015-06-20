@@ -8,30 +8,89 @@ from pprint import pprint
 from datetime import datetime
 import pickle
 import itertools
-import scraperwiki
+import sqlite3
+import base64
+import zlib
 
-def get_page(url, name):
-    if os.path.exists(name) and len(open(name, 'r').read()) == 0:
-        os.unlink(name)
+SQLITE_CONNECTION = sqlite3.connect('data.sqlite')
+SQLITE_CONNECTION.row_factory = sqlite3.Row
 
-    if not os.path.exists(name):
-        f = open(name, 'w')
-        retry = 0
-        while retry < 5:
-            try:
-                print "Downloading", url
-                f.write(urllib2.urlopen(url).read())
-                break
-            except urllib2.HTTPError, e:
-                print "Failed to get", repr(url), "retrying"
-                retry += 1
-            except:
-                print "Failed to get", repr(url)
-                raise
-        else:
-            raise IOError("Failed to get %r", url)
-        f.close()
-    return bs4.BeautifulSoup(open(name, 'r').read())
+def sqlite_init_table(table, keys, columns):
+    unique = ', '.join(keys)
+    columns_sql = ', '.join(['%s TEXT' % c for c in columns])
+    command = 'CREATE TABLE IF NOT EXISTS %s (%s, UNIQUE (%s))' % (table, columns_sql, unique)
+    SQLITE_CONNECTION.execute(command)
+    SQLITE_CONNECTION.commit()
+
+def sqlite_get(table, keys_dict):
+    command = 'SELECT * FROM %s WHERE ' % table
+    command += ' AND '.join(['%s="%s"' % (k, v.replace('"', '""')) for k, v in keys_dict.iteritems()])
+    r = SQLITE_CONNECTION.execute(command).fetchone()
+    if not r:
+        return None
+
+    row = {}
+    for i, k in enumerate(r.keys()):
+        row[k] = r[i]
+    return row
+
+def sqlite_put(table, keys, row):
+    columns = [c[0] for c in SQLITE_CONNECTION.execute('SELECT * FROM %s' % table).description]
+
+    values = ', '.join(['"%s"' % row[c].replace('"', '""') for c in columns])
+    command = 'REPLACE INTO %s VALUES (%s)' % (table, values)
+    SQLITE_CONNECTION.execute(command)
+
+def sqlite_encode(data):
+    return base64.b64encode(zlib.compress(data))
+
+def sqlite_decode(data):
+    return zlib.decompress(base64.b64decode(data))
+
+def download_page(url):
+    retry = 0
+    while retry < 5:
+        try:
+            print "Downloading", url
+            return urllib2.urlopen(url).read()
+            break
+        except urllib2.HTTPError, e:
+            print "Failed to get", repr(url), "retrying"
+            retry += 1
+        except:
+            print "Failed to get", repr(url)
+            raise
+    else:
+        raise IOError("Failed to get %r", url)
+
+def get_page_from_disk(url, name):
+    if not os.path.exists('cache'):
+        os.mkdir('cache')
+    file_name = os.path.join('cache', name)
+    if os.path.exists(file_name) and len(open(file_name, 'r').read()) == 0:
+        os.unlink(file_name)
+
+    if not os.path.exists(file_name):
+        with open(file_name, 'w') as f:
+            f.write(download_page(url))
+
+    return open(file_name, 'r').read()
+
+def get_page_from_sqlite(url):
+    row = sqlite_get('cached_pages', { 'url': url })
+    if row:
+        return sqlite_decode(row['page'])
+
+    page = download_page(url)
+    sqlite_put('cached_pages', ['url'], { 'url': url, 'page': sqlite_encode(page) })
+    SQLITE_CONNECTION.commit()
+
+    return page
+
+
+def get_page(url, name, cacheInSql=False):
+    page = get_page_from_sqlite(url) if cacheInSql else get_page_from_disk(url, name)
+    return bs4.BeautifulSoup(page)
 
 def sanify(name):
     return "-".join(name.lower().split())
@@ -68,21 +127,28 @@ def get_council_info(council):
         if not row.findAll('td'):
             continue
         election_link, election_date_tag = row.findAll('td')
+        election_name = election_link.text
+        election_date = election_date_tag.text
+
+        election_info_sql_key = { 'council': council_name, 'election_name': election_name, 'election_date': election_date }
+        cached_election_info = sqlite_get('election_infos', election_info_sql_key)
+        if cached_election_info:
+            election_info = pickle.loads(sqlite_decode(cached_election_info['pickle']))
+            council_info['elections'].append(election_info)
+            continue;
 
         election_info = {}
         council_info['elections'].append(election_info)
 
         election_url_tag = election_link.find('a')
         election_info['url'] = election_url_base + '/' + urllib2.quote(election_url_tag.attrs['href'].split('/', 1)[-1])
-        election_info['name'] = election_link.text
-
-        election_info['date'] = election_date_tag.text
+        election_info['name'] = election_name
+        election_info['date'] = election_date
 
         election_cache_name = sanify(council_name+'-'+election_info['name']+'.html')
-        election_details_page = get_page(election_info['url'], election_cache_name)
+        election_details_page = get_page(election_info['url'], election_cache_name, cacheInSql=True)
 
         details_div = election_details_page.find('div', {'id': 'council-results'})
-
 
         if details_div.findAll('table', {'class': 'waecModTable'}):
             old_style = True
@@ -139,6 +205,9 @@ def get_council_info(council):
 
             election_info['wards'][ward_name] = ward_election
 
+        election_info_sql_key['pickle'] = sqlite_encode(pickle.dumps(election_info))
+        sqlite_put('election_infos', ['council', 'election_name', 'election_date'], election_info_sql_key)
+
     return council_info
 
 def parseExpiryDate(expiry):
@@ -181,26 +250,24 @@ def get_current(today, council_info):
 
     return current
 
-try:
-    with open('council_infos', 'r') as f:
-        council_infos = pickle.load(f)
-except IOError:
-    host = 'http://www.elections.wa.gov.au'
-    council_list = get_page(host+'/elections/local/council-list/', 'council-list.html')
-    council_divs = council_list.findAll(attrs={'class': 'council-list-name'})
-    council_infos = [get_council_info(div) for div in council_divs]
-    with open('council_infos', 'w') as f:
-        pickle.dump(council_infos, f);
+sqlite_init_table('cached_pages', ['url'], ['url', 'page'])
+sqlite_init_table('election_infos', ['council', 'election_name', 'election_date'], ['council', 'election_name', 'election_date', 'pickle'])
+sqlite_init_table('data', ['name', 'council'], ['name', 'council', 'ward', 'council_website', 'expiry'])
+
+host = 'http://www.elections.wa.gov.au'
+council_list = get_page(host+'/elections/local/council-list/', 'council-list.html')
+council_divs = council_list.findAll(attrs={'class': 'council-list-name'})
+council_infos = [get_council_info(div) for div in council_divs]
 
 today = datetime.today()
-current_councillors = [get_current(today, info) for info in council_infos]
+current_councillors = [get_current(today, info) for info in council_infos if info]
 all_current_councillors = list(itertools.chain.from_iterable(current_councillors))
 
 for councillor in all_current_councillors:
-    try:
-        existing_row = scraperwiki.sqlite.select('* FROM swdata WHERE name="%s" AND council="%s"' % (councillor['name'], councillor['council']))[0]
-    except:
-        existing_row = None
+    existing_row = sqlite_get('data', { 'name': councillor['name'], 'council': councillor['council'] })
     if not existing_row or parseExpiryDate(existing_row['expiry']) < parseExpiryDate(councillor['expiry']):
         print 'Adding councillor:', councillor
-        scraperwiki.sqlite.save(['name', 'council'], councillor)
+        sqlite_put('data', ['name', 'council'], councillor)
+SQLITE_CONNECTION.commit()
+
+SQLITE_CONNECTION.close()

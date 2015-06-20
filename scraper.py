@@ -4,7 +4,11 @@
 import os
 import bs4
 import urllib2
-import pprint
+from pprint import pprint
+from datetime import datetime
+import pickle
+import itertools
+import scraperwiki
 
 def get_page(url, name):
     if os.path.exists(name) and len(open(name, 'r').read()) == 0:
@@ -27,21 +31,18 @@ def get_page(url, name):
         else:
             raise IOError("Failed to get %r", url)
         f.close()
-    return bs4.BeautifulSoup(open(name, 'r').read()) 
+    return bs4.BeautifulSoup(open(name, 'r').read())
 
 def sanify(name):
     return "-".join(name.lower().split())
 
-host = 'http://www.elections.wa.gov.au'
-council_list = get_page(host+'/elections/local/council-list/', 'council-list.html')
-
-for council in council_list.findAll(attrs={'class': 'council-list-name'}):
+def get_council_info(council):
     council_name = council.text
 
     council_elections_list_url = host+urllib2.quote(council.find('a').attrs['href'])
     council_elections_list = get_page(council_elections_list_url, sanify(council_name)+'.html')
 
-    council_info = {}
+    council_info = { 'name': council_name }
     for div in council_elections_list.find('div', {'class': 'council-left'}).findAll('div'):
         info_type = div.find('strong')
         href_type = div.find('a')
@@ -54,16 +55,20 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
             else:
                 council_info['website'] = url.strip()
         else:
-            print div
+            # Probably an address
+            if 'other' not in council_info:
+                council_info['other'] = div.text
+            else:
+                print div
 
     election_url_base = council_elections_list_url.rsplit('/', 2)[0]
 
-    council_info['elections'] = [] 
+    council_info['elections'] = []
     for row in council_elections_list.find('table', {'id': 'council-election-list-table'}).findAll('tr'):
         if not row.findAll('td'):
             continue
         election_link, election_date_tag = row.findAll('td')
-        
+
         election_info = {}
         council_info['elections'].append(election_info)
 
@@ -78,7 +83,7 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
 
         details_div = election_details_page.find('div', {'id': 'council-results'})
 
-        
+
         if details_div.findAll('table', {'class': 'waecModTable'}):
             old_style = True
             ward_tables = zip(details_div.findAll('table', {'class': lambda x: x != 'waecModTable'})[1:], details_div.findAll('table', {'class': 'waecModTable'}))
@@ -114,7 +119,7 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
                     continue
 
                 candidate = {}
-                candidate['name'], candidate['votes'], cand_percent, candidate['expires'] = (x.text.strip() for x in row.findAll('td'))
+                candidate['name'], candidate['votes'], cand_percent, candidate['expiry'] = (x.text.strip() for x in row.findAll('td'))
 
                 if 'class' in row.attrs:
                     if row.attrs['class'][0] in ('waecModTableFooter','waecModTableHeader'):
@@ -134,6 +139,68 @@ for council in council_list.findAll(attrs={'class': 'council-list-name'}):
 
             election_info['wards'][ward_name] = ward_election
 
-    print "="*80
-    pprint.pprint(council_info)
-    print "="*80
+    return council_info
+
+def parseExpiryDate(expiry):
+    return datetime.strptime(expiry, '%d %B %Y')
+
+def get_current(today, council_info):
+    current = []
+    for election_info in council_info['elections']:
+        for ward_name, ward_results in election_info['wards'].iteritems():
+            for candidate in ward_results['candidates']:
+                if not candidate['elected']:
+                    continue
+
+                if len(candidate['name'].split(' ')) < 2:
+                    print 'Invalid candidate name in %s %s %s' % (council_info['name'], election_info['name'], ward_name)
+                    print '                         ', candidate
+                    continue
+
+                if ward_name == 'MAYORAL':
+                    expiry = ward_results['Expiry of term']
+                else:
+                    expiry = candidate['expiry']
+
+                try:
+                    expiry_date = parseExpiryDate(expiry)
+                    if expiry_date < today:
+                        continue
+                except ValueError:
+                    print 'Invalid expiry date in %s %s %s' % (council_info['name'], election_info['name'], ward_name)
+                    print '                      ', candidate
+                    continue
+
+                current.append({
+                    'name': candidate['name'],
+                    'council': council_info['name'],
+                    'ward': ward_name,
+                    'council_website': council_info['website'] if 'website' in council_info else '',
+                    'expiry': expiry,
+                })
+
+    return current
+
+try:
+    with open('council_infos', 'r') as f:
+        council_infos = pickle.load(f)
+except IOError:
+    host = 'http://www.elections.wa.gov.au'
+    council_list = get_page(host+'/elections/local/council-list/', 'council-list.html')
+    council_divs = council_list.findAll(attrs={'class': 'council-list-name'})
+    council_infos = [get_council_info(div) for div in council_divs]
+    with open('council_infos', 'w') as f:
+        pickle.dump(council_infos, f);
+
+today = datetime.today()
+current_councillors = [get_current(today, info) for info in council_infos]
+all_current_councillors = list(itertools.chain.from_iterable(current_councillors))
+
+for councillor in all_current_councillors:
+    try:
+        existing_row = scraperwiki.sqlite.select('* FROM swdata WHERE name="%s" AND council="%s"' % (councillor['name'], councillor['council']))[0]
+    except:
+        existing_row = None
+    if not existing_row or parseExpiryDate(existing_row['expiry']) < parseExpiryDate(councillor['expiry']):
+        print 'Adding councillor:', councillor
+        scraperwiki.sqlite.save(['name', 'council'], councillor)
